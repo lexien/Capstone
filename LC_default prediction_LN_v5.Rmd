@@ -1,0 +1,880 @@
+# Capstone Project: Lending Club Default Prediction 
+
+####  Aug 2018
+####  Lexie Nie
+#
+#
+
+> Data: 
+
+This data is a status snapshot of 2017.11 for loans applied in Q1 2016 from lending club 
+
+> Goal: 
+
+To predict loan status ('Default' or 'Fully Paid') at the time of application and inform decision regarding loan approval 
+
+> Major Steps: 
+
+1.  Data Pre-processing & EDA
+2.  Feature Defination, Selection & Engineering (not using information post application)
+3.  Modeling using Logistic Regression, Random Forest, Gradient Boosting Trees, and compare performance 
+4.  Conclusion & Afterthoughts 
+
+> Summary: 
+
+> 1. Data Pre-processing & EDA: 
+
+1.  Data has 133889 rows  and  151 columns; 35 categorical features, 98 numerical features, 4 potential response variables, and 14 columns with pure NAs to begins with.
+2.  Get rid of two NA rows with all NAs
+3.  Get rid of columns that provide no additional information: all values the same (in this case all NAs), or variables with a unique level for each row but no information gain (url, id). 
+4.  Clean up Date features: check and transform to useful format
+5.  Convert the categorical features that are supposed to be numerical
+6.  EDA: look at feature distribution and correlation among different dimensions
+ 
+  
+> 2. Define Feature Set & Response Variable: 
+
+1.  For the purpose of this model, we excluded features that happened post application, which includes: payment information, hardship, settlement related, and latest fico score related features. (If include any of these features to predict default, the prediction AUC will be higher than 95%) 
+
+2.  Define Response Variable: 
+Available loan status: Fully Paid, Current, In Grace Period, Late (16-30 days), Late (31-120 days),  Charged Off, Default. 
+Use [ Late (31-120 days) , Default, Charge off ] to approximate Default, and model against Fully Paid. Not using ‘Current’ since we do not know the final result yet, and not using ‘In Grace Period’ and ‘Late(16-30 days)’ since it's not that severe. 
+
+
+> 3. Feature Exploration & Engineering: 
+
+1.  Date Feature: look at reasonable ways to bucket date features
+
+2.  Categorical Features:
+    + Treat features with too many levels: collapse levels
+    + Treat features that need string manipulation to make sense of data  
+    
+3.  Numerical Features: 
+    + Update features to reflect loan is jointly applied
+    + Write a function to bin and check linearity
+    + Log transformation if necessary
+    + Combine multiple features into one if necessary
+    
+4.  Missing Value Treatment: 
+    + Treat categorical columns
+    + Treat numerical columns
+        + The major NA columns are month related columns and ratio columns:
+            + 'month since' values could be missing if the action never happened. Treatment: use a large value ex. 999
+            + Ratio features could be NA because either the action does not exist or the denominator is 0. Treatment: binning NA as a separate category
+    + Treat the rest unexplained NAs -- impute with median
+
+> 4. Feature Pre-screening:
+
+* Did not use p-value for t-test (for numerical variable) and chi-square test (for categorical variable) to pre-select features in case there are interaction items that's actually significant while the individual ones are not.
+
+> 5. Modeling & Performance Comparison: 
+
+* Used 10000 rows to run the model first for a quick assessment of model performance, and then run with full data. 
+* Tried three models:  
+
+1. Logistic Regression: 
+    + Use as baseline: training, cross-validation, select lambda 1se
+    + 73.1% test AUC
+2. Random Forest:
+    + Training, use OOB error as cross validation and hyper parameter tuning
+    + Achieved a close performance between train & test, tuned parameters for more complex tree structures to increase accuracy. 
+    + 71.9% test AUC
+
+3. Gradient Boosting Trees (XGboost): 
+    + Training, cross validation to tune hyper parameter
+    + Overfitting, so tried to use simple trees and shrink the difference between train & test 
+    + Runtime the shortest among the three models
+    + 73.2% test AUC
+
+> 6. Conclusion & Afterthoughts: 
+
+* Conclusion: 
+    + Based on performance, speed, and interpretability (easier to communicate and produce reason code), it’s better to use logistic regression in this particular case.  
+
+    
+* Afterthoughts: 
+
+    + Note: since this is a capstone project in class, not a take home exam, I’ve included below one of my confusion about model performance vs. expectation.
+ 
+    + I assumed better performance in Random Forest & XGBoost Trees compared to Logistic Regression. However, RF is underfitting, and XGBT is overfitting even after parameter tuning, with lower or close performance than Logistic Regression.  
+
+    + I’ve tried a few other things to boost performance:
+ex. Insteading of simply binning a lot of numerical features to a few categories, I tried to identify the cause of NAs, labeled them differently, and kept the features numerical, just to retain as much information as possible. However, it’s not making a big difference, only lifted ~ 1% of the performance in Logistic Regression, and 0.5% in RF & XGBT.
+
+    + Could you please help share some light on this puzzle? Thanks. 
+
+> 7. Code:
+
+* Please see source code available at: https://github.com/lexien/Capstone
+
+===============================================================================================================================
+
+> Detailed Code Below: 
+
+## Load Data & Overview
+
+``` {r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(ggthemes)
+library(lattice)
+library(dplyr)
+library(maps)
+library(lubridate)
+library(zoo)
+library(DescTools)
+library(corrplot)
+
+rm(list=ls())
+loan <- read.csv("~/Documents/AWSTDY/DS501/R/LoanStats_securev1_2016Q1.csv", header = TRUE, stringsAsFactors = FALSE, na.strings = c(""), skip = 1)
+# print dimensions
+loanT <- loan
+dim(loan)
+length(colnames(loan)[which(sapply(loan, function(x){is.numeric(x)}))])
+length(colnames(loan)[which(sapply(loan, function(x){is.character(x)}))])
+# colnames(loan)
+```
+
+## Data Pre-processing
+#### Check NA, remove rows with all NAs
+```{r echo = T, results = 'hide'}
+
+num.NA <- sort(sapply(loan, function(x) {sum(is.na(x))}), decreasing=TRUE)
+num.NA[num.NA>0]
+loan[is.na(loan$loan_status),] # only two records with everything else NA, disregard
+loan=subset(loan, !is.na(loan_status)) # the rest NA will be treated later
+```
+
+#### Check and remove features that offers no extra information
+```{r}
+num.value <- sapply(loan, function(x){length(unique(x))})
+which(num.value == 1) # no information gain, can disregard 
+which(num.value == nrow(loan))  # id, url, can disregard
+loan=loan[,-which(num.value == 1 | num.value == nrow(loan))] ####
+
+```
+
+#### Clean up Date features
+```{r}
+
+library(zoo)
+date.cols = colnames(loan)[c(grep('_d$', colnames(loan)), grep('_date$',colnames(loan)))]
+date.cols
+
+for (col_i in date.cols) {
+    loan[, col_i] <-  as.Date(as.yearmon(loan[, col_i], "%b-%Y"))
+}
+
+```
+
+#### Treat Categorical features that supposed to be Numerical
+```{r}
+# Features with too many levels
+uni.value =sapply(loan, function(x){length(unique(x))})
+cat.feats=colnames(loan)[which(sapply(loan, function(x){is.character(x)}))]
+mul.level=colnames(loan)[which(uni.value >= 50)]
+mul.level.cat=intersect(cat.feats,mul.level)
+
+# Clearly some features are supposed to be numeric, but it is not
+head(loan[,mul.level.cat])
+which(sapply(loan[1, ], function(x){grepl('%', x)}))
+
+loan$revol_util <- as.numeric(sapply(strsplit(loan$revol_util, '%'), '[', 1))
+loan$int_rate <- as.numeric(sapply(strsplit(loan$int_rate, '%'), '[', 1))
+```
+
+
+## EDA 
+
+Distribution of loan amount
+``` {r echo=FALSE}
+
+ggplot(data=loan, aes(x=loan_amnt)) + 
+  geom_histogram(bins=40,aes(y=..density.., fill=..count..)) +
+  scale_fill_gradient("Count", low="#abc6f2", high="#116af9") +
+  stat_function(fun=dnorm,
+                color="#0b7c53",size=1,
+                args=list(mean=mean(loan$loan_amnt), 
+                          sd=sd(loan$loan_amnt))) +
+  xlab("Loan Amount") +
+  xlab("Density") +
+  theme_solarized()
+```
+
+
+Distribution of loan amount by some features
+
+Here is the overview of the occurrence of loans of different grades:
+
+``` {r}
+Desc(loan$grade, main = "Loan grades", plotit = TRUE)
+```
+
+
+
+Then I checked the distribution of loan amount by grade.
+
+``` {r}
+ggplot(data=loan,aes(loan_amnt, fill=grade))+
+  geom_density(alpha=0.25) + 
+  facet_grid(grade ~ .)
+```
+
+
+
+The loan amount distribution seems to have the same shape and has
+multiple peaks for members of different grades.
+
+Here is the overview of the occurrence of loans of different grades:
+
+``` {r}
+Desc(loan$home_ownership, plotit = TRUE)
+```
+
+
+
+Then I checked the distribution of loan amount by loan status.
+
+``` {r}
+box_status <- ggplot(loan, aes(loan_status, loan_amnt))
+box_status + geom_boxplot(aes(fill = loan_status)) +
+  theme(axis.text.x = element_blank()) +
+  labs(list(
+    title = "Loan amount by status",
+    x = "Status",
+    y = "Amount"))  
+```
+
+
+
+What’s the reason for taking a loan with LendingClub?
+
+``` {r}
+Desc(loan$purpose, main = "Loan purposes", plotit = TRUE)
+```
+
+
+What’s the loan amount by purpose?
+
+``` {r}
+ggplot(data=loan,aes(purpose,loan_amnt)) +geom_boxplot(aes(fill=purpose))+labs(list(title = "Loan amount by purpose",x = "purpose of Loan",y = "Loan Amount")) 
+```
+
+
+Examine the total loan amount by space and time
+Total loan amount by state
+
+``` {r echo=FALSE}
+# install.packages('maps')
+loanbook=loan
+suppressPackageStartupMessages(library(maps))
+loanbook$region <- loanbook$addr_state
+loanbook$region <- as.factor(loanbook$region)
+levels(loanbook$region)<- c("alaska", "alabama","arkansas", "arizona", "california","colorado","connecticut","district of columbia","delaware","florida","georgia","hawaii","iowa","idaho","illinois","indiana","kansas","kentucky","louisiana","massachusetts","maryland","maine","michigan","minnesota","missouri","mississippi","montana","north carolina","north dakota","nebraska","new hampshire","new jersey","new mexico","nevada","new york","ohio","oklahoma","oregon","pennsylvania","rhode island","south carolina","south dakota","tennessee","texas","utah","virginia","vermont","washington","wisconsin","west virginia","wyoming")
+
+all_states <- map_data("state")
+state_by_loan <-loanbook %>% group_by(region) %>%
+                summarise(value = sum(loan_amnt, na.rm=TRUE))
+state_by_loan$region <- as.character(state_by_loan$region)
+
+Total <- merge(all_states, state_by_loan, by="region")
+
+p <- ggplot()
+p <- p + geom_polygon(data=Total, aes(x=long, y=lat, group = group, fill=Total$value),colour="white"
+      ) + scale_fill_continuous(low = "skyblue", high = "darkblue", guide="colorbar")
+P1 <- p + theme_bw()  + labs(fill = "Total loan amount" 
+                            ,title = "Heat Map of loan amount in all states", x="", y="")
+P1 + scale_y_continuous(breaks=c()) + scale_x_continuous(breaks=c()) + theme(panel.border =  element_blank())
+```
+
+
+Top 10 states with maximum loan amount
+
+``` {r echo=FALSE}
+#Top 10 states with maximum loan amount
+loanbook %>% filter(loan_status != 'Fully Paid') %>% 
+  group_by(addr_state) %>% 
+  summarize(TotalLoan = sum(loan_amnt)) %>% 
+  arrange(desc(TotalLoan)) %>% 
+  head(10) -> TopStates
+
+ggplot(data=TopStates,aes(x=reorder(addr_state,-TotalLoan),y=TotalLoan,label=TotalLoan)) + 
+  geom_bar(stat='identity',fill = "#4286f4") +
+  geom_text(vjust=-1,size=2.5) +
+  xlab("States") +
+  ylab("Total Loan Amount") +
+  theme_solarized()
+```
+
+
+Total loan amount by time
+
+``` {r echo=FALSE}
+amnt_df <- loan %>% 
+  select(issue_d, loan_amnt) %>% 
+  group_by(issue_d) %>% 
+  summarise(Amount = sum(loan_amnt))
+
+ts_amnt <- ggplot(amnt_df, 
+                  aes(x = issue_d, y = Amount))
+ts_amnt + geom_line() + xlab("Date issued")
+```
+
+
+Distribution of Interest rate
+
+``` {r echo=FALSE}
+ggplot(data=loan, aes(x=int_rate)) + 
+  geom_histogram(bins=40,aes(y=..density.., fill=..count..)) +
+  scale_fill_gradient("Count", low="#abc6f2", high="#116af9") +
+  stat_function(fun=dnorm,
+                color="#0b7c53",size=1,
+                args=list(mean=mean(loan$int_rate), 
+                          sd=sd(loan$int_rate))) +
+  xlab("Interest Rate") +
+  xlab("Density") +
+  theme_solarized()
+```
+
+
+Distribution of interest rates for different grades
+
+``` {r}
+ggplot(data=loan, aes(grade,int_rate,fill=grade))+geom_boxplot(outlier.color = "blue")+labs(title="Box plot of Interest rate")
+```
+
+
+We observe the interest rates of loan grades A, B and C are relatively
+lower than other grades, probably there are higher number of borrowings
+observed.
+
+Correlation among variables: loan amout, Annual Income and funded amount
+
+``` {r}
+dt <- data.frame(loanamnt =loan$loan_amnt, inc =loan$annual_inc,fund= loan$funded_amnt)
+M<- cor(dt,use="pairwise.complete.obs") #
+corrplot(M,method = "circle")
+```
+
+
+## Define Feature Set & Response Variable: 
+Go through the documentation and feature list, exclude any feature that's post application: 
+which includes Current loan payment features, hardship related, settlement related, and latest fico scores 
+``` {r}
+
+post.cols = colnames(loan)[c(grep('pymnt', colnames(loan)), grep('hardship',colnames(loan)),grep('settlement', colnames(loan)))]
+other_pymnt.cols=c('total_rec_int' , 'total_rec_late_fee', 'total_rec_prncp', 'out_prncp','out_prncp_inv', 'recoveries','collection_recovery_fee')
+other_hardship.cols=c('payment_plan_start_date','deferral_term','orig_projected_additional_accrued_interest')
+last_fico.cols=c('last_fico_range_high','last_fico_range_low','last_credit_pull_d')
+post.cols=c(post.cols,other_pymnt.cols,other_hardship.cols,last_fico.cols)
+
+loan=loan[, -which(colnames(loan) %in% post.cols)]
+dim(loan)
+
+```
+
+#### Define Response Variable: loan_status_binary: 
+##### Default=Default + Charged Off + Late >30 days 
+##### Get rid of other potential response variables
+
+```{r}
+
+loan <- loan[, -which(colnames(loan) %in% c('grade', 'int_rate', 'sub_grade'))]
+table(loan$loan_status)
+loan <- subset(loan, !loan_status %in% c('Current', 'In Grace Period','Late (16-30 days)'))
+loan$loan_status_binary=ifelse(loan$loan_status %in% c('Fully Paid'), 0, 1)
+loan=loan[, -which(colnames(loan) %in% c('loan_status'))]
+loan_c1=loan
+
+```
+
+
+## Feature Exploration, Selection & Engineering: 
+### Date Features: 
+```{r}
+loan$issue_mon = format(as.yearmon(loan$issue_d, "%b-%Y"),"%m")
+loan$mths_since_issue =as.integer((as.Date('2017-11-01') - loan$issue_d) /30)  
+
+with(loan, (table(issue_mon, loan_status_binary)/as.numeric(table(issue_mon)))) # did not seem to be very relavant, but keep in the model for furture observations
+plot(density(loan$mths_since_issue))
+barplot(table(loan$loan_status_binary, loan$mths_since_issue))
+plot(with(loan, table(mths_since_issue,loan_status_binary)/as.numeric(table(mths_since_issue)))[,2], type='l')  # bad rate seems to be close, and not linear, so that's use categorical variable issue_mon instead 
+
+loan$mths_since_issue=NULL
+
+loan$earliest_cr_line <-  as.Date(as.yearmon(loan$earliest_cr_line, "%b-%Y"))
+summary(loan$earliest_cr_line)
+loan$mths_since_crline <- as.integer((as.Date('2017-11-01') - loan$earliest_cr_line) /30)
+summary(loan$mths_since_crline)
+plot(density(loan$mths_since_crline))
+boxplot(mths_since_crline ~ loan_status_binary, data = loan)
+
+# Quick binning to check linearity
+ct=tapply(loan$loan_status_binary,cut(loan$mths_since_crline,c(56.0, 162.0, 209.0,227.7,276.0,886.0)),mean)
+plot(ct,xaxt='n', ylab='bad rate', type='l')
+axis(1, at=1:length(ct),labels=names(ct)) # linear, can use the numerical feature directly, no need to transform
+
+```
+
+### Categorical Features: 
+```{r}
+# For categorical features with too many levels, could collapse levels as we did before.
+mul.level.cat=colnames(loan)[intersect(which(sapply(loan, function(x) {is.character(x)})), which(uni.value >= 35))]
+#  "emp_title"  "zip_code"   "addr_state"
+loan$zip <- as.numeric(sapply(strsplit(loan$zip_code, 'xx'), '[', 1))
+
+int_state <- by(loan, loan$addr_state, function(x) {
+  sum(x$loan_status_binary)/nrow(x)
+})
+
+loan$state_int <-
+  ifelse(loan$addr_state %in% names(int_state)[which(int_state <=
+                                                       quantile(int_state, 0.25))], 'low',
+         ifelse(loan$addr_state %in% names(int_state)[which(int_state <=
+                                                              quantile(int_state, 0.5))],'lowmedium',
+                ifelse(loan$addr_state %in% names(int_state)[which(int_state <= quantile(int_state, 0.75))], 
+                       'mediumhigh', 'high')))
+
+#  "emp_title" coud be usefully intuitively, but it's too many levels, not using for now 
+
+loan <- loan[, -which(colnames(loan) %in% c("emp_title", "zip_code","addr_state"))]
+
+loan$emp_length <- ifelse(loan$emp_length == 'n/a', loan$emp_length,
+                          ifelse(loan$emp_length %in% c('< 1 year', '1 year', '2 years', '3 years'),
+                                 '< 3 years', ifelse(loan$emp_length %in% c('4 years', '5 years', '6 years', '7 years'), 
+                                                     '4-7 years', '> 8 years')))
+
+```
+
+### Numerical Features: 
+```{r}
+# Update features to reflect loan is jointly applied
+colnames(loan)[grep('joint',colnames(loan))]
+
+summary(loan$dti)
+plot(density(loan$dti,na.rm=T))
+loan$dti <- ifelse(!is.na(loan$dti_joint), loan$dti_joint, loan$dti)
+plot(density(loan$dti,na.rm=T))
+
+# write a function to bin and check linearity for numerical features 
+check.linear.plot <- function(loan, col.name) {
+    ct=tapply(loan$loan_status_binary,cut(loan[, col.name], c(min(loan[, col.name],na.rm = T) - 1, quantile(loan[, col.name], c(0.25, 0.5, 0.75), na.rm = T), max(loan[, col.name], na.rm = T))),mean)
+    plot(ct,xaxt='n', ylab='bad rate', xlab=col.name, type='l')
+    axis(1, at=1:length(ct),labels=names(ct))
+}
+
+check.linear.plot(loan,'dti') # linearity check okay, no need to bin into categorical feature
+
+plot(density(loan$revol_util,na.rm=T))
+boxplot(revol_util ~ loan_status_binary,data=loan) # might not be significant, but keep it for now
+
+
+# log transformation if neccesary
+loan$annual_inc <- ifelse(!is.na(loan$annual_inc_joint), loan$annual_inc_joint, loan$annual_inc)
+plot(density(loan$annual_inc))
+loan$annual_inc_log=log(loan$annual_inc)
+plot(density(loan$annual_inc_log))
+check.linear.plot(loan,'annual_inc_log')
+loan$annual_inc=NULL
+
+loan$verification_status <- ifelse(!is.na(loan$verification_status_joint), loan$verification_status_joint, loan$verification_status)
+
+loan = loan[, - grep('joint',colnames(loan))]
+
+# combine two features into one for original fico score
+loan$orig_fico=with(loan,(fico_range_high+fico_range_low)/2)
+loan$fico_range_high <- NULL
+loan$fico_range_low <- NULL
+
+loan_m=loan
+```
+
+### Missing Value Treatment: 
+```{r}
+# Missing values
+num.NA = sapply(loan, function(x) { sum(is.na(x))})
+sort(num.NA/nrow(loan), decreasing = TRUE)[1:10]
+na.col=colnames(loan) [which(num.NA>1000)]
+na.col[sapply(loan[,na.col], function(x){is.character(x)})]
+```
+
+### Treat categorical columns: 
+```{r results = 'hide'}
+
+with(subset(loan, !is.na(loan$title)),table(loan_status_binary,desc))
+loan = loan[, -which(colnames(loan) %in% c('desc'))]
+
+with(subset(loan, !is.na(loan$title)),table(loan_status_binary,title))
+loan$title=ifelse(is.na(loan$title),'not_avail',loan$title)
+
+loan_c2=loan
+```
+
+
+### Treat numerical columns:
+##### The major NA columns are month related columns and ratio columns:
+##### 'month since' values could be missing if the action never happned
+Treatment: use a large value ex. 999
+```{r}
+sort(num.NA[which(grepl('mths_since', names(num.NA)) & num.NA>0)], decreasing = T)
+#'mths_since_last_delinq' is NA because delinq is 0. Only 13 cases are not due to that 
+summary(loan$mths_since_last_delinq)
+with(loan[is.na(loan$mths_since_last_delinq),],summary(loan$delinq_amnt))
+which(is.na(loan$mths_since_last_delinq) & loan$delinq_amnt>0)
+nrow(loan[is.na(loan$mths_since_last_delinq) & loan$delinq_amnt>0,])
+loan$mths_since_last_delinq=ifelse((is.na(loan$mths_since_last_delinq) & loan$delinq_amnt==0),999,loan$mths_since_last_delinq)
+
+# 'mths_since_recent_revol_delinq', 67 more records with unexplanined NA
+with(loan[is.na(loan$mths_since_recent_revol_delinq),],summary(loan$mths_since_last_delinq))
+nrow(loan[is.na(loan$mths_since_recent_revol_delinq) & !is.na(loan$mths_since_last_delinq) & loan$delinq_amnt>0,])
+with(loan[which(is.na(loan$mths_since_recent_revol_delinq) & !is.na(loan$mths_since_last_delinq) & loan$delinq_amnt>0),],table(loan_status_binary))
+loan$mths_since_recent_revol_delinq=ifelse((is.na(loan$mths_since_recent_revol_delinq) & loan$delinq_amnt==0),999,loan$mths_since_recent_revol_delinq)
+
+# 'mths_since_recent_inq' is NA 100% because there's no inqury. 
+summary(loan$mths_since_recent_inq)
+with(loan[is.na(loan$mths_since_recent_inq),],summary(loan$inq_fi))
+nrow(is.na(loan$mths_since_recent_inq) & (loan$inq_fi>0))
+loan$mths_since_recent_inq=ifelse((is.na(loan$mths_since_recent_inq) & loan$inq_fi==0),999,loan$mths_since_recent_inq)
+
+# 'mths_since_last_record' is NA 100% because there's no public records. 
+summary(loan$mths_since_last_record)
+with(loan[is.na(loan$mths_since_last_record),],summary(pub_rec))
+loan$mths_since_last_record=ifelse((is.na(loan$mths_since_last_record) & loan$pub_rec==0),999,loan$mths_since_last_record)
+
+# 'mths_since_recent_bc' is NA because there's no bc account, 300 NA is not explained
+summary(loan$mths_since_recent_bc)
+summary(loan$num_bc_tl)
+with(loan[is.na(loan$mths_since_recent_bc),],summary(num_bc_tl))
+nrow(which(is.na(loan$mths_since_recent_bc) & (loan$num_bc_tl==0)))
+loan$mths_since_recent_bc=ifelse((is.na(loan$mths_since_recent_bc) & loan$num_bc_tl==0),999,loan$mths_since_recent_bc)
+
+# 'mths_since_recent_bc_dlq' due to no bc delinq account, 100 NA unexplained 
+summary(loan$mths_since_recent_bc_dlq)
+summary(loan$acc_now_delinq)
+table(loan$acc_now_delinq)
+with(loan[is.na(loan$mths_since_recent_bc_dlq),],summary(acc_now_delinq))
+with(loan[which(is.na(loan$mths_since_recent_bc_dlq) & (loan$acc_now_delinq>0)),],table(loan_status_binary))  ### missing randomly due to error
+loan$mths_since_recent_bc_dlq=ifelse((is.na(loan$mths_since_recent_bc_dlq) & loan$acc_now_delinq==0),999,loan$mths_since_recent_bc_dlq)
+
+# mths_since_rcnt_il because there's no installment account, 27 NA unexplained. 
+summary(loan$mths_since_rcnt_il)
+summary(loan$num_il_tl)
+with(loan[is.na(loan$mths_since_rcnt_il),],summary(num_il_tl))
+with(loan[which(is.na(loan$mths_since_rcnt_il) & (loan$num_il_tl>0)),],table(loan_status_binary)) ### seem random, disgard or impute with median
+loan$mths_since_rcnt_il=ifelse((is.na(loan$mths_since_rcnt_il) & loan$num_il_tl==0),999,loan$mths_since_rcnt_il)
+
+# 'mths_since_last_major_derog' is NA 100% because ?  --- could not find a specific reason, creat a seperate bin for NA and change this to categorical feature
+summary(loan$mths_since_last_major_derog)
+with(loan[is.na(loan$mths_since_last_major_derog),],table(loan_status_binary))
+
+for(col_i in c('mths_since_last_major_derog')) {
+  breaks <- quantile(loan[, col_i], c(0.1,0.25, 0.5,0.75, 0.9), na.rm = T)
+  breaks <- c(min(loan[, col_i], na.rm = T) - 1, breaks, max(loan[, col_i], na.rm = T))
+  loan[, col_i] <- ifelse(is.na(loan[, col_i]),
+                          'not_avail', as.character(cut(loan[, col_i], breaks = breaks)))
+}
+
+# treat mo_sin_old_il_acct , because there's no installment account, 4 NA unexplained. 
+check.linear.plot(loan,'mo_sin_old_il_acct') # not linear
+summary(loan$mo_sin_old_il_acct)
+summary(loan$num_il_tl)
+with(loan[is.na(loan$mo_sin_old_il_acct),],summary(num_il_tl))
+with(loan[which(is.na(loan$mo_sin_old_il_acct) & (loan$num_il_tl>0)),],table(loan_status_binary))
+loan$mo_sin_old_il_acct=ifelse((is.na(loan$mo_sin_old_il_acct) & loan$num_il_tl==0),999,loan$mo_sin_old_il_acct)
+nrow(loan[which(is.na(loan$mo_sin_old_il_acct) & (loan$num_il_tl>0)),]) # 4 NA left, seems random, impute with median later
+```
+
+##### Ratio features could be NA because either the action does not exist or the denominator is 0
+Treatment: binning NA as a sperate category
+```{r}
+# look into il_util feature: Ratio of total current balance to high credit/credit limit on all install acct
+# is it bcuz no open account? Not for all the cases.
+summary(subset(loan, is.na(il_util))$open_act_il)
+# is it becuz of the limit is 0? since il_util = total_bal_il / total_il_high_credit_limit
+# not for all the cases, but most 
+with(subset(loan, is.na(il_util)), summary(total_il_high_credit_limit))
+head(loan[which(is.na(loan$il_util) & loan$total_il_high_credit_limit != 0),
+          c('il_util', 'total_bal_il', 'total_il_high_credit_limit')])
+loan$il_util <- ifelse(is.na(loan$il_util) & loan$total_il_high_credit_limit != 0, 
+                       loan$total_bal_il/ loan$total_il_high_credit_limit, loan$il_util)
+summary(subset(loan, is.na(il_util) & total_il_high_credit_limit == 0)$open_act_il)
+# NA is because there's no installment account or no credit limt 
+nrow(loan[which(is.na(loan$il_util) & (loan$total_il_high_credit_limit != 0) & (loan$open_act_il>0)),])
+
+check.linear.plot(loan,'il_util') # linearity check okay
+
+loan$il_util <-  ifelse(is.na(loan$il_util), 'no_il',
+                        as.character(cut(loan$il_util, 
+                                         c(min(loan$il_util, na.rm = T) - 0.01,
+                                           quantile(loan$il_util, na.rm = T, c(0.1, 0.25,0.5,0.75, 0.9)),
+                                           max(loan$il_util, na.rm = T)))))
+table(loan$il_util)
+
+
+# Treat bc_util, percent_bc_gt_75, bc_open_to_buy
+# no bankcard account? # does not seem so 
+summary(subset(loan, is.na(bc_util))$num_bc_tl)
+
+# is it becuz of the Total bankcard high credit/credit limit is 0?  
+with(subset(loan, is.na(bc_util)), summary(total_bc_limit))
+nrow(loan[which(is.na(loan$bc_util) & loan$total_bc_limit!=0),])
+
+loan$bc_util <-  ifelse(is.na(loan$bc_util), 'no_avail',
+                        as.character(cut(loan$bc_util, 
+                                         c(min(loan$bc_util, na.rm = T) - 0.01,
+                                           quantile(loan$bc_util, na.rm = T, c(0.1, 0.25,0.5,0.75, 0.9)),
+                                           max(loan$bc_util, na.rm = T)))))
+
+# no open to buy_bc account? yes --- 500 NA, impute with median later 
+summary(subset(loan, is.na(percent_bc_gt_75))$bc_open_to_buy)
+summary(loan$percent_bc_gt_75)
+summary(loan$bc_open_to_buy)
+with(loan[(is.na(loan$bc_open_to_buy)),],table(loan_status_binary))
+
+# treat num_tl_120dpd_2m:
+# is it bcuz there is no open account? No. because there's 0 even in 30 day features
+summary(subset(loan, is.na(num_tl_120dpd_2m))$open_acc)
+with(subset(loan,!is.na(loan$num_tl_120dpd_2m)),table(loan_status_binary,num_tl_120dpd_2m))
+with(subset(loan, is.na(num_tl_120dpd_2m)), summary(num_tl_30dpd))
+loan$num_tl_120dpd_2m <- ifelse(is.na(loan$num_tl_120dpd_2m), 0, loan$num_tl_120dpd_2m)
+```
+
+#### Treat the rest unexplained NAs -- impute with median 
+```{r}
+
+num.NA = sapply(loan, function(x) { sum(is.na(x))})
+for(col_i in names(num.NA)[num.NA > 0]) {
+  loan[, col_i] <- ifelse(is.na(loan[, col_i]), median(loan[, col_i], na.rm = T), loan[, col_i])
+}
+
+loan_c3=loan
+
+```
+
+## Modeling
+### Run with a subset of data for quick model evaluation
+### 1. Logistic Regression as Benchmark
+
+```{r message=F, cache=T}
+set.seed(7)
+train.ind <- sample(1:nrow(loan), 0.7* nrow(loan))
+train=loan[train.ind,]
+test=loan[-train.ind,]
+library(glmnet)
+loan.dummy=sparse.model.matrix( ~. , loan[, -which(colnames(loan) %in% c('loan_status_binary'))])
+
+ind <- loan.dummy[train.ind, ]
+dep <- loan[train.ind,'loan_status_binary']
+
+ttind <-loan.dummy[-train.ind, ]
+ttdep=loan[-train.ind,'loan_status_binary']
+dim(ind);length(dep);dim(ttind);length(ttdep)
+
+# To run a quicker assessment, let's use a small sample of the data first
+set.seed(9)
+strain=sample(1:nrow(train), 10000)
+stest=sample(1:nrow(test),6000)
+
+Sys.time()
+cv.mod0<- cv.glmnet(ind[strain, ], dep[strain], family = 'binomial', type.measure = "auc")
+Sys.time()
+plot(cv.mod0)
+# print(cv.mod0)
+tx=ttind[stest,]
+ty=ttdep[stest]
+
+predcv0=predict(cv.mod0, newx=tx, s='lambda.1se')
+library(pROC)
+plot.roc(ty, c(predcv0), print.auc=T, print.thres=T, main='Test AUC w lambda.1se')
+
+coef=coef(cv.mod0,s='lambda.1se')
+coef
+length(coef[which(coef!=0)])
+
+predcv1=predict(cv.mod0, newx=tx, s='lambda.min') 
+plot.roc(ty, c(predcv1), print.auc=T, print.thres=T, main='Test AUC w lambda.min') 
+coef1=coef(cv.mod0,s='lambda.min')
+# coef1
+length(coef1[which(coef1!=0)])
+
+
+# As a comparison for AUC performance, let's use the original fico score as a benchmark 
+auc(train$loan_status_binary,train$orig_fico) 
+
+loanS=loan
+
+```
+
+### Let's try other models for comparison
+### 2.Random Forest
+```{r message=F, cache=T}
+
+# install.packages('randomForest')
+library(randomForest)
+loan$loan_status_binary=as.factor(loan$loan_status_binary)
+loan$loan_status_binary=relevel(loan$loan_status_binary, ref = '0')
+cat.feats=colnames(loan)[which(sapply(loan, function(x){is.character(x)}))]
+for (i in cat.feats) {loan[,i]=as.factor(loan[,i])}
+
+fac.feats=colnames(loan)[which(sapply(loan,function(x){is.factor(x)}))]
+fac.feats
+cat.feats_2=colnames(loan)[which(sapply(loan, function(x){is.character(x)}))]
+cat.feats_2
+
+train=loan[train.ind,]
+test=loan[-train.ind,]
+
+Sys.time()
+rf.m0=randomForest(loan_status_binary ~., data=train[strain, ], sampsize=c(2000,2000), ntree=1000, mtry=30, nodesize=5, maxnodes=200,cutoff=c(0.5,0.5))
+Sys.time()
+
+print(rf.m0)
+plot(rf.m0)
+legend("right", colnames(rf.m0$err.rate),col=1:4,cex=0.8,fill=1:4)
+
+# rf.m0$err.rate
+plot.roc(train[strain,"loan_status_binary"], c(rf.m0$votes[,2]), print.auc=T, print.thres=T,main = 'Training AUC')
+
+pred_rf0=predict(rf.m0, test[stest,],type='vote')[,2]
+
+plot.roc(test[stest,"loan_status_binary"], c(pred_rf0), print.auc=T, print.thres=T, main = 'Test AUC')
+
+varImpPlot(rf.m0, sort=T, n.var = 30, main = 'Top 30 Feature Importance')
+
+```
+
+
+### 3. Gradient Boosted Trees
+```{r message=F, cache=T}
+
+library(xgboost)
+
+xg.cv.m0 <- xgb.cv(data = ind[strain, ], label = dep[strain], nfold = 5,
+              nrounds = 100, objective = "binary:logistic", metrics=list("auc"),
+               max_depth=4, min_child_weight=10,gamma=0.4, lambda=0.5,subsample=0.7, eta=0.1, early_stopping_rounds = 10, straitified=T, maximize = T)
+```
+
+```{r message=F, cache=T, results = 'hide'}
+xg.m0=xgboost(data = ind[strain, ], label = dep[strain], eval.metric="auc",
+              nrounds = 100, objective = "binary:logistic",
+              max_depth=4, min_child_weight=10,gamma=0.4, lambda=0.5,subsample=0.7, eta=0.1, early_stopping_rounds=3,straitified=T, maximize = T)
+```
+
+```{r message=F, cache=T}
+dtrain <- xgb.DMatrix(ind[strain, ], label = dep[strain])
+dtest <- xgb.DMatrix(tx, label = ty)
+
+pred_xg_train <- predict(xg.m0, dtrain, outputmargin=TRUE)
+# print(pred_xg_train)
+plot.roc(dep[strain], c(pred_xg_train), print.auc=T, print.thres=T, main = 'Training AUC')
+
+pred_xg_test <- predict(xg.m0, dtest, outputmargin=TRUE)
+# print(pred_xg_test)
+plot.roc(ty, c(pred_xg_test), print.auc=T, print.thres=T, main = 'Test AUC')
+
+importance_matrix=xgb.importance(colnames(tx),model=xg.m0)
+xgb.plot.importance(importance_matrix, top_n=30, left_margin=7, main = 'Top 30 Feature Importance')
+
+```
+
+### Run on full data set
+### 1. Logistic Regresssion
+```{r message=F, cache=T, echo=FALSE}
+print('run time')
+Sys.time()
+cv.mod<- cv.glmnet(ind, dep, family = 'binomial', type.measure = "auc")
+Sys.time()
+plot(cv.mod)
+# print(cv.mod)
+
+predcv=predict(cv.mod, newx=ttind, s='lambda.1se')
+library(pROC)
+plot.roc(ttdep, c(predcv), print.auc=T, print.thres=T, main='Test AUC w lambda.1se')
+
+coef=coef(cv.mod,s='lambda.1se')
+print('Coefficient for lambda.1se Model')
+coef
+print(' No. feature selected under lambda.1se' )
+length(coef[which(coef!=0)])
+
+predcv=predict(cv.mod, newx=ttind, s='lambda.min') 
+plot.roc(ttdep, c(predcv), print.auc=T, print.thres=T, main='Test AUC w lambda.min')  # 0.731 
+print(' No. feature selected under lambda.min' )
+coef1=coef(cv.mod,s='lambda.min')
+# coef1
+length(coef1[which(coef1!=0)])
+
+```
+
+###  2.Random Forest 
+```{r message=F, cache=T, echo=FALSE}
+
+library(randomForest)
+loan$loan_status_binary=as.factor(loan$loan_status_binary)
+loan$loan_status_binary=relevel(loan$loan_status_binary, ref = '0')
+cat.feats=colnames(loan)[which(sapply(loan, function(x){is.character(x)}))]
+for (i in cat.feats) {loan[,i]=as.factor(loan[,i])}
+
+fac.feats=colnames(loan)[which(sapply(loan,function(x){is.factor(x)}))]
+#fac.feats
+cat.feats_2=colnames(loan)[which(sapply(loan, function(x){is.character(x)}))]
+#cat.feats_2
+
+train=loan[train.ind,]
+test=loan[-train.ind,]
+
+Sys.time()
+rf.m=randomForest(loan_status_binary ~., data=train, sampsize=c(4000,4000), ntree=1000, mtry=30, nodesize=5, maxnodes=200,cutoff=c(0.5,0.5))
+print('run time')
+Sys.time()
+
+print(rf.m)
+plot(rf.m)
+legend("right", colnames(rf.m$err.rate),col=1:4,cex=0.8,fill=1:4)
+
+# rf.m$err.rate
+plot.roc(train[,"loan_status_binary"], c(rf.m$votes[,2]), print.auc=T, print.thres=T, main = 'Training AUC')
+
+pred_rf=predict(rf.m, test,type='vote')[,2]
+
+plot.roc(test[,"loan_status_binary"], c(pred_rf), print.auc=T, print.thres=T, main = 'Test AUC')
+
+varImpPlot(rf.m, sort=T, n.var = 30, main = 'Top 30 Feature Importance')
+```
+
+###  3.XGBoost
+Cross Validation Result
+```{r message=F, cache=T, echo=FALSE}
+
+library(xgboost)
+
+dtrain <- xgb.DMatrix(ind, label = dep)
+dtest <- xgb.DMatrix(ttind, label = ttdep)
+
+xg.cv.m <- xgb.cv(data = ind, label = dep, nfold = 5,
+                   nrounds = 100, objective = "binary:logistic", metrics=list("auc"),
+                   max_depth=4, min_child_weight=5,gamma=0.7, lambda=0.7,subsample=0.8, eta=0.1, early_stopping_rounds = 10, straitified=T, maximize = T)
+print('run time')
+Sys.time()
+```
+
+```{r message=F, cache=T, echo=FALSE, results = 'hide'}
+
+xg.m=xgboost(data = ind, label = dep, eval.metric="auc",
+              nrounds = 100, objective = "binary:logistic",
+              max_depth=4, min_child_weight=5,gamma=0.7, lambda=0.7,subsample=0.8, eta=0.1, early_stopping_rounds=3,straitified=T, maximize = T)
+```
+
+``` {r message=F, cache=T, echo=FALSE}
+Sys.time()
+pred_xg_train <- predict(xg.m, dtrain, outputmargin=TRUE)
+# print(pred_xg_train)
+plot.roc(dep, c(pred_xg_train), print.auc=T, print.thres=T,main = 'Training AUC')
+
+pred_xg_test <- predict(xg.m, dtest, outputmargin=TRUE)
+# print(pred_xg_test)
+plot.roc(ttdep, c(pred_xg_test), print.auc=T, print.thres=T, main = 'Test AUC')
+
+importance_matrix=xgb.importance(colnames(ttind),model=xg.m)
+xgb.plot.importance(importance_matrix, top_n=30, left_margin=7, main = 'Top 30 Feature Importance')
+
+```
